@@ -1,0 +1,6 @@
+<launch>
+
+   <node name="mobilebot_ros_node" pkg="mobilebot_ros" type="mobilebot_ros" output="screen" >
+   </node>
+
+</launch>
