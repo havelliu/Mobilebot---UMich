@@ -1,0 +1,279 @@
+/*******************************************************************************
+ * mobilebot_ros.c
+ *
+ *
+ *******************************************************************************/
+
+
+//this lib was compiled for C so we need to be explicit
+extern "C"
+{
+#include "rc_usefulincludes.h"
+#include "roboticscape.h"
+}
+
+
+#include "mobilebot_config.h"
+
+#include <ros/ros.h>
+#include "std_msgs/String.h"
+#include "geometry_msgs/Twist.h"
+#include "mobilebot_msgs/MobileBotState.h"
+#include <unistd.h>
+
+float dutyL;  // left  motor PWM duty cycle
+float dutyR;  // right motor PWM duty cycle
+
+// global variables
+ros::Publisher              state_publisher;
+
+/*******************************************************************************
+ * Local Function declarations
+ *******************************************************************************/
+// IMU interrupt routine
+void mobilebot_controller();
+
+// threads
+void* setpoint_manager(void* ptr);
+void* printf_loop(void* ptr);
+
+// regular functions
+void on_pause_press();
+void on_mode_release();
+int blink_green();
+int blink_red();
+
+/*******************************************************************************
+ * Global Variables
+ *******************************************************************************/
+rc_imu_data_t imu_data;
+float linear_desired;
+float angular_desired;
+
+
+/*******************************************************************************
+ * shutdown_signal_handler(int signo)
+ *
+ * catch Ctrl-C signal and change system state to EXITING
+ * all threads should watch for get_state()==EXITING and shut down cleanly
+ *******************************************************************************/
+void ros_compatible_shutdown_signal_handler(int signo)
+{
+  if (signo == SIGINT)
+    {
+      rc_set_state(EXITING);
+      ROS_INFO("\nReceived SIGINT Ctrl-C.");
+      ros::shutdown();
+    }
+  else if (signo == SIGTERM)
+    {
+      rc_set_state(EXITING);
+      ROS_INFO("Received SIGTERM.");
+      ros::shutdown();
+    }
+}
+
+
+void CmdCallback(const geometry_msgs::Twist::ConstPtr& cmd_vel)
+{
+  //ros::Time::now().toSec();
+  linear_desired = cmd_vel->linear.x;
+  angular_desired = cmd_vel->angular.z;
+
+  return;
+}
+
+
+/*******************************************************************************
+ * main()
+ *
+ * Initialize the filters, IMU, threads, & wait untill shut down
+ *******************************************************************************/
+int main(int argc, char** argv) 
+{
+
+  // Announce this program to the ROS master as a "node" called "mobilebot_ros_node"
+  ros::init(argc, argv, "mobilebot_ros_node");
+
+  // Start the node resource managers (communication, time, etc)
+  ros::start();
+
+  // Broadcast a simple log message
+  ROS_INFO("File %s compiled on %s %s.",__FILE__, __DATE__, __TIME__);
+
+  // Create nodehandle
+  ros::NodeHandle mobilebot_node;
+
+  // Advertise the topics this node will publish
+  state_publisher = mobilebot_node.advertise<mobilebot_msgs::MobileBotState>("mobilebot/state", 10);
+
+  // subscribe the function CmdCallback to the topuc edumip/cmd
+  ros::Subscriber sub_cmd = mobilebot_node.subscribe("turtlebot3_teleop", 10, CmdCallback);
+
+
+  if(rc_initialize()<0)
+    {
+      ROS_INFO("ERROR: failed to initialize cape.");
+      return -1;
+    }
+
+  rc_set_led(RED,1);
+  rc_set_led(GREEN,0);
+  rc_set_state(UNINITIALIZED);
+
+  // set up button handlers
+  rc_set_pause_pressed_func(&on_pause_press);
+  rc_set_mode_released_func(&on_mode_release);
+
+  // start printf_thread
+  pthread_t  printf_thread;
+  pthread_create(&printf_thread, NULL, printf_loop, (void*) NULL);
+
+  // set up IMU configuration
+  rc_imu_config_t imu_config = rc_default_imu_config();
+  imu_config.dmp_sample_rate = SAMPLE_RATE_HZ;
+  imu_config.orientation = ORIENTATION_Y_UP;
+
+  // start imu
+  if(rc_initialize_imu_dmp(&imu_data, imu_config)){
+    ROS_INFO("ERROR: can't talk to IMU, all hope is lost\n");
+    rc_blink_led(RED, 5, 5);
+    return -1;
+  }
+
+  // overide the robotics cape default signal handleers with
+  // one that is ros compatible
+  signal(SIGINT,  ros_compatible_shutdown_signal_handler);
+  signal(SIGTERM, ros_compatible_shutdown_signal_handler);
+
+  // start balance stack to control setpoints
+  pthread_t  setpoint_thread;
+  pthread_create(&setpoint_thread, NULL, setpoint_manager, (void*) NULL);
+
+  // this should be the last step in initialization
+  // to make sure other setup functions don't interfere
+  rc_set_imu_interrupt_func(&mobilebot_controller);
+
+  //initialize encoders to 0
+  rc_set_encoder_pos(ENCODER_CHANNEL_L,0);
+  rc_set_encoder_pos(ENCODER_CHANNEL_R,0);
+
+  // start in the RUNNING state, pressing the puase button will swap to
+  // the PUASED state then back again.
+  ROS_INFO("\nMobilebot Initialized...\n");
+  rc_set_state(RUNNING);
+
+  // Process ROS callbacks until receiving a SIGINT (ctrl-c)
+  ros::spin();
+
+  // news
+  ROS_INFO("Exiting!");
+
+  // shut down the pthreads
+  rc_set_state(EXITING);
+
+  // Stop the ROS node's resources
+  ros::shutdown();
+
+  // cleanup
+  rc_power_off_imu();
+  rc_cleanup();
+  return 0;
+}
+
+/*******************************************************************************
+ * void* setpoint_manager(void* ptr)
+ *
+ * This thread is in charge of adjusting the controller setpoint based on user
+ * inputs from dsm radio control. Also detects pickup to control arming the
+ * controller.
+ *******************************************************************************/
+void* setpoint_manager(void* ptr)
+{
+  rc_usleep(2500000);
+  rc_set_state(RUNNING);
+  rc_set_led(RED,0);
+  rc_set_led(GREEN,1);
+
+  while(rc_get_state()!=EXITING)
+    {
+      // sleep at beginning of loop so we can use the 'continue' statement
+      rc_usleep(1000000/SETPOINT_MANAGER_HZ); 
+      // nothing to do if paused, go back to beginning of loop
+      if(rc_get_state() != RUNNING) continue;
+
+
+    }
+
+  pthread_exit(NULL);}
+/*******************************************************************************
+ * void mobilebot_controller()
+ *
+ * discrete-time controller operated off IMU interrupt
+ * Called at SAMPLE_RATE_HZ
+ *******************************************************************************/
+void mobilebot_controller()
+{
+  /*************************************************************
+   * check for various exit conditions AFTER state estimate
+   ***************************************************************/
+  if(rc_get_state()==EXITING){
+    rc_disable_motors();
+    return;
+  }
+	
+  dutyL = 0;
+  dutyR = 0;	
+  rc_set_motor(MOTOR_CHANNEL_L, MOTOR_POLARITY_L * dutyL); 
+  rc_set_motor(MOTOR_CHANNEL_R, MOTOR_POLARITY_R * dutyR); 
+
+  return;
+}
+
+
+/*******************************************************************************
+ * printf_loop() 
+ *
+ * prints diagnostics to console
+ * this only gets started if executing from terminal
+ *******************************************************************************/
+void* printf_loop(void* ptr)
+{
+  rc_state_t last_rc_state, new_rc_state; // keep track of last state
+  mobilebot_msgs::MobileBotState  mobilebot_state;
+
+  new_rc_state = rc_get_state();
+  
+  while(rc_get_state()!=EXITING)
+    {
+      last_rc_state = new_rc_state; 
+      new_rc_state = rc_get_state();
+      // publish the state
+      //state_publisher.publish(mobilebot_state);
+
+
+      rc_usleep(1000000 / PRINTF_HZ);
+
+    }
+
+  pthread_exit(NULL);
+  //return NULL;
+} 
+
+/*******************************************************************************
+ * void on_pause_press() 
+ *
+ *******************************************************************************/
+void on_pause_press()
+{
+  
+}
+
+/*******************************************************************************
+ * void on_mode_release()
+ *
+ * toggle between position and angle modes if MiP is paused
+ *******************************************************************************/
+void on_mode_release()
+{
+}
