@@ -71,7 +71,7 @@ float x_pos = 0.0;
 float y_pos = 0.0;
 float x_pos_robot_frame = 0.0;
 float y_pos_robot_frame = 0.0;
-float angle = 0;  //Angle of the robot with respect to the global frame
+float angle = 3.141592/2;  //Angle of the robot with respect to the global frame
 float currentTime = 0.0;
 float pastTime = 0.0;
 float turbo = 1.2;
@@ -334,23 +334,18 @@ void mobilebot_controller()
   {
     leftError = (linear_desired - leftError)/MAX_SPEED;
     rightError = (linear_desired - rightError)/MAX_SPEED;
-
-    dutyL = rc_march_filter(&filter1, leftError);
-    dutyR = rc_march_filter(&filter2, rightError);
-
-    dutyL = dutyL * .925;
   }
   else
   {
 
       leftError = (linear_desired/MAX_SPEED - angular_desired/MAX_ANGULAR_SPEED) - leftError/MAX_SPEED;
       rightError = (linear_desired/MAX_SPEED + angular_desired/MAX_ANGULAR_SPEED) - rightError/MAX_SPEED;
-
-      dutyL = rc_march_filter(&filter1, leftError);
-      dutyR = rc_march_filter(&filter2, rightError);
   }
 
-  increment = (leftDistance - rightDistance)/TRACK_WIDTH;
+  dutyL = rc_march_filter(&filter1, leftError);
+  dutyR = rc_march_filter(&filter2, rightError);
+
+  increment = (rightDistance - leftDistance)/TRACK_WIDTH;
 
   if(angle >= 2*3.141592)
   {
@@ -361,11 +356,11 @@ void mobilebot_controller()
 	angle = angle + 2*3.141592;
   }
 
-  x_pos_robot_frame = centerDistance*sin(increment);
+  x_pos_robot_frame = -centerDistance*sin(increment);
   y_pos_robot_frame = centerDistance*cos(increment);
 
-  x_pos += x_pos_robot_frame*cos(angle) + y_pos_robot_frame*sin(angle);
-  y_pos += y_pos_robot_frame*cos(angle) - x_pos_robot_frame*sin(angle);
+  x_pos += x_pos_robot_frame*sin(angle) + y_pos_robot_frame*cos(angle);
+  y_pos += y_pos_robot_frame*sin(angle) - x_pos_robot_frame*cos(angle);
 
   angle += increment;
 
@@ -384,10 +379,10 @@ void mobilebot_controller()
 
   odom_trans.transform.translation.x = x_pos*.3048;
   odom_trans.transform.translation.y = y_pos*.3048;
-  odom_trans.transform.rotation.x = q.x();
-  odom_trans.transform.rotation.y = q.y();
-  odom_trans.transform.rotation.z = q.z();
-  odom_trans.transform.rotation.w = q.w();
+  odom_trans.transform.rotation.x = q.x;
+  odom_trans.transform.rotation.y = q.y;
+  odom_trans.transform.rotation.z = q.z;
+  odom_trans.transform.rotation.w = q.w;
 
   odom_broadcaster.sendTransform(odom_trans);
 
@@ -414,9 +409,6 @@ void mobilebot_controller()
   
   rc_set_motor(MOTOR_CHANNEL_L, MOTOR_POLARITY_L * dutyL);
   rc_set_motor(MOTOR_CHANNEL_R, MOTOR_POLARITY_R * dutyR);
-
-  //std::cout << odom.pose.pose.position.x << ' ' << odom.pose.pose.position.y << std::endl;
-  //std::cout << "Angle: " << angle << std::endl;
 
   return;
 }
